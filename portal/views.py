@@ -9,12 +9,14 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LoginView, LogoutView
 from django.http import JsonResponse
 from django.shortcuts import redirect, render
-from django.utils.text import slugify
 from django.urls import reverse_lazy
+from django.utils.text import slugify
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
-from django.views.generic import TemplateView
+from django.views.generic import CreateView, DeleteView, ListView, TemplateView, UpdateView
+
+from .models import Reservation, Terrain
 
 User = get_user_model()
 
@@ -31,11 +33,34 @@ class SignupErrors:
     non_field: str | None = None
 
 
-def home(request):
-    """Racine : renvoie vers le tableau de bord ou la connexion."""
-    if request.user.is_authenticated:
-        return redirect("portal:dashboard")
-    return redirect("portal:admin_login")
+def public_home(request):
+    """Accueil public (Django templates, Bootstrap)."""
+    return render(request, "portal/public/home.html")
+
+
+class ClientReservationView(TemplateView):
+    template_name = "portal/public/reservation.html"
+
+
+class ClientContactView(TemplateView):
+    template_name = "portal/public/contact.html"
+
+
+@method_decorator(login_required, name="dispatch")
+class ClientPanierView(TemplateView):
+    template_name = "portal/public/panier.html"
+
+
+@method_decorator(login_required, name="dispatch")
+class ClientOffresView(TemplateView):
+    template_name = "portal/public/offres.html"
+
+
+@require_POST
+def client_logout(request):
+    """Déconnexion côté site client (ne touche pas au portail admin)."""
+    logout(request)
+    return redirect("portal:home")
 
 
 class PortalLoginView(LoginView):
@@ -53,8 +78,8 @@ class ClientLoginView(LoginView):
     redirect_authenticated_user = True
 
     def get_success_url(self):
-        # Après connexion client, on renvoie vers l'accueil client (Next).
-        return self.get_redirect_url() or "/client"
+        # Après connexion client, on renvoie vers l'accueil Django (sans Next).
+        return self.get_redirect_url() or reverse_lazy("portal:home")
 
 
 def client_signup(request):
@@ -65,7 +90,7 @@ def client_signup(request):
     - POST : crée un utilisateur Django puis connecte la session
     """
     if request.user.is_authenticated:
-        return redirect("/client")
+        return redirect("portal:home")
 
     if request.method == "GET":
         return render(request, "portal/client_login.html", {"show_signup": True})
@@ -134,7 +159,7 @@ def client_signup(request):
     # Pour l'instant on n'enregistre pas 'phone' en base (pas de champ standard).
     user.save()
     auth_login(request, user)
-    return redirect("/client")
+    return redirect("portal:home")
 
 
 class PortalLogoutView(LogoutView):
@@ -155,6 +180,153 @@ class DashboardView(TemplateView):
         ctx["stats"] = [
             {"label": "Réservations aujourd'hui", "value": "42", "accent": "navy"},
             {"label": "Terrains actifs", "value": "08", "accent": "amber"},
+        ]
+        return ctx
+
+
+# -----------------------
+# CRUD Terrain (Bootstrap)
+# -----------------------
+
+
+@method_decorator(login_required, name="dispatch")
+class TerrainListView(ListView):
+    model = Terrain
+    template_name = "portal/crud/terrain_list.html"
+    context_object_name = "terrains"
+    paginate_by = 10
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        q = (self.request.GET.get("q") or "").strip()
+        if q:
+            qs = qs.filter(nom__icontains=q)
+        return qs
+
+
+@method_decorator(login_required, name="dispatch")
+class TerrainCreateView(CreateView):
+    model = Terrain
+    fields = ["nom", "type", "indoor", "prix_par_session", "actif"]
+    template_name = "portal/crud/terrain_form.html"
+    success_url = reverse_lazy("portal:terrain_list")
+
+
+@method_decorator(login_required, name="dispatch")
+class TerrainUpdateView(UpdateView):
+    model = Terrain
+    fields = ["nom", "type", "indoor", "prix_par_session", "actif"]
+    template_name = "portal/crud/terrain_form.html"
+    success_url = reverse_lazy("portal:terrain_list")
+
+
+@method_decorator(login_required, name="dispatch")
+class TerrainDeleteView(DeleteView):
+    model = Terrain
+    template_name = "portal/crud/terrain_confirm_delete.html"
+    success_url = reverse_lazy("portal:terrain_list")
+
+
+# ---------------------------
+# CRUD Reservation (Bootstrap)
+# ---------------------------
+
+
+@method_decorator(login_required, name="dispatch")
+class ReservationListView(ListView):
+    model = Reservation
+    template_name = "portal/crud/reservation_list.html"
+    context_object_name = "reservations"
+    paginate_by = 10
+
+    def get_queryset(self):
+        qs = super().get_queryset().select_related("terrain", "client")
+        q = (self.request.GET.get("q") or "").strip()
+        if q:
+            qs = qs.filter(client__username__icontains=q) | qs.filter(terrain__nom__icontains=q)
+        return qs
+
+
+@method_decorator(login_required, name="dispatch")
+class ReservationCreateView(CreateView):
+    model = Reservation
+    fields = ["terrain", "client", "date", "heure_debut", "heure_fin", "statut"]
+    template_name = "portal/crud/reservation_form.html"
+    success_url = reverse_lazy("portal:reservation_list")
+
+
+@method_decorator(login_required, name="dispatch")
+class ReservationUpdateView(UpdateView):
+    model = Reservation
+    fields = ["terrain", "client", "date", "heure_debut", "heure_fin", "statut"]
+    template_name = "portal/crud/reservation_form.html"
+    success_url = reverse_lazy("portal:reservation_list")
+
+
+@method_decorator(login_required, name="dispatch")
+class ReservationDeleteView(DeleteView):
+    model = Reservation
+    template_name = "portal/crud/reservation_confirm_delete.html"
+    success_url = reverse_lazy("portal:reservation_list")
+
+
+@method_decorator(login_required, name="dispatch")
+class ReservationsAdminView(TemplateView):
+    """Vue — écran admin des réservations (template MVT)."""
+
+    template_name = "portal/reservations.html"
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["kpis"] = {
+            "today_bookings": 42,
+            "active_courts": "08",
+        }
+        ctx["reservations"] = [
+            {
+                "when_title": "Today, Oct 24",
+                "when_sub": "10:00 AM - 11:30 AM",
+                "court": "Court 01",
+                "court_sub": "PREMIUM INDOOR",
+                "accent": "blue",
+                "client_initials": "JD",
+                "client_name": "Julianna Duarte",
+                "status": "CONFIRMED",
+                "status_style": "ok",
+            },
+            {
+                "when_title": "Today, Oct 24",
+                "when_sub": "11:30 AM - 01:00 PM",
+                "court": "Court 04",
+                "court_sub": "PANORAMIC GLASS",
+                "accent": "amber",
+                "client_initials": "RK",
+                "client_name": "Robert Kallis",
+                "status": "IN-PROGRESS",
+                "status_style": "live",
+            },
+            {
+                "when_title": "Tomorrow, Oct 25",
+                "when_sub": "08:00 AM - 08:30 AM",
+                "court": "Court 02",
+                "court_sub": "PREMIUM INDOOR",
+                "accent": "blue",
+                "client_initials": "SM",
+                "client_name": "Sarah Millstone",
+                "status": "PENDING",
+                "status_style": "warn",
+            },
+            {
+                "when_title": "Tomorrow, Oct 25",
+                "when_sub": "10:00 AM - 12:00 PM",
+                "court": "Court 07",
+                "court_sub": "STANDARD OUTDOOR",
+                "accent": "violet",
+                "client_initials": "TC",
+                "client_name": "Thomas Chen",
+                "status": "CANCELLED",
+                "status_style": "danger",
+            },
         ]
         return ctx
 
